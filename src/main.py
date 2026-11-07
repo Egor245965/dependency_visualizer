@@ -453,6 +453,42 @@ def print_graph(graph):
             )
 
 
+def load_order_dfs(package, graph, visited, order):
+    if package in visited:
+        return
+
+    visited.add(package)
+
+    for dependency in sorted(graph.get(package, set())):
+        load_order_dfs(
+            dependency,
+            graph,
+            visited,
+            order,
+        )
+
+    order.append(package)
+
+
+def build_load_order(graph, package):
+    order = []
+    visited = set()
+
+    load_order_dfs(
+        package,
+        graph,
+        visited,
+        order,
+    )
+
+    return order
+
+
+def print_load_order(order):
+    print("Порядок загрузки (зависимости -> пакет):")
+    print(" -> ".join(order))
+
+
 def analyze(args):
     if args.test_mode:
         repository = load_test_repository(
@@ -480,6 +516,12 @@ def main():
         validate_args(args)
         graph = analyze(args)
         print_graph(graph)
+
+        load_order = build_load_order(
+            graph,
+            args.package,
+        )
+        print_load_order(load_order)
 
     except ValueError as error:
         parser.error(str(error))

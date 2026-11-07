@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from src.main import (
+    build_load_order,
     build_package_url,
     build_test_graph,
     download_package,
@@ -423,6 +424,44 @@ class TestMain(unittest.TestCase):
         self.assertEqual(graph["A"], {"B"})
         self.assertEqual(graph["B"], {"C"})
         self.assertEqual(graph["C"], {"A"})
+
+    def test_load_order(self):
+        graph = {
+            "A": {"B", "C"},
+            "B": {"D"},
+            "C": {"D"},
+            "D": set(),
+        }
+
+        order = build_load_order(graph, "A")
+
+        self.assertEqual(
+            order,
+            ["D", "B", "C", "A"],
+        )
+
+    def test_load_order_with_cycle(self):
+        graph = {
+            "A": {"B"},
+            "B": {"C"},
+            "C": {"A"},
+        }
+
+        order = build_load_order(graph, "A")
+
+        self.assertEqual(
+            order,
+            ["C", "B", "A"],
+        )
+
+    def test_load_order_without_dependencies(self):
+        graph = {
+            "A": set(),
+        }
+
+        order = build_load_order(graph, "A")
+
+        self.assertEqual(order, ["A"])
 
 
 if __name__ == "__main__":
