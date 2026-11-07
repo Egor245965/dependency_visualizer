@@ -5,7 +5,7 @@ if "%~1"=="" (
         --package express ^
         --repository https://registry.npmjs.org ^
         --output graph.png ^
-        --max-depth 3
+        --max-depth 2
 ) else (
     python src\main.py %*
 )

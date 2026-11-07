@@ -60,6 +60,15 @@ def validate_url(repository):
     )
 
 
+def is_valid_test_package(package):
+    return (
+        isinstance(package, str)
+        and package.isascii()
+        and package.isalpha()
+        and package.isupper()
+    )
+
+
 def validate_args(args):
     if not args.package.strip():
         raise ValueError("Имя пакета не может быть пустым")
@@ -79,6 +88,13 @@ def validate_args(args):
             raise ValueError(
                 "Файл тестового репозитория не найден"
             )
+
+        if not is_valid_test_package(args.package):
+            raise ValueError(
+                "В тестовом режиме имя пакета должно "
+                "состоять из заглавных латинских букв"
+            )
+
     elif not validate_url(args.repository):
         raise ValueError("Некорректный URL репозитория")
 
@@ -222,23 +238,16 @@ def get_direct_dependencies(package_json):
     return package_json.get("dependencies", {})
 
 
-def print_dependencies(package, version, dependencies):
-    print(f"Прямые зависимости {package}@{version}:")
+def get_real_dependencies(package, repository, cache):
+    if package in cache:
+        return cache[package]
 
-    if not dependencies:
-        print("Прямых зависимостей нет")
-        return
-
-    for name, required_version in sorted(dependencies.items()):
-        print(f"{name}: {required_version}")
-
-def analyze_package(args):
     package_data = fetch_package_data(
-        args.repository,
-        args.package,
+        repository,
+        package,
     )
 
-    version, tarball_url = get_tarball_url(
+    _, tarball_url = get_tarball_url(
         package_data
     )
 
@@ -250,15 +259,218 @@ def analyze_package(args):
         archive_data
     )
 
-    dependencies = get_direct_dependencies(
-        package_json
+    dependencies = set(
+        get_direct_dependencies(package_json)
     )
 
-    print_dependencies(
-        args.package,
-        version,
-        dependencies,
+    cache[package] = dependencies
+    return dependencies
+
+
+def validate_test_repository(repository):
+    for package, dependencies in repository.items():
+        if not is_valid_test_package(package):
+            raise ValueError(
+                "Имена тестовых пакетов должны состоять "
+                "из заглавных латинских букв"
+            )
+
+        if not isinstance(dependencies, list):
+            raise ValueError(
+                "Зависимости тестового пакета должны быть списком"
+            )
+
+        if not all(
+            is_valid_test_package(item)
+            for item in dependencies
+        ):
+            raise ValueError(
+                "Имена зависимостей должны состоять "
+                "из заглавных латинских букв"
+            )
+
+        if not all(
+            item in repository
+            for item in dependencies
+        ):
+            raise ValueError(
+                "Все зависимости должны быть описаны "
+                "в тестовом репозитории"
+            )
+
+
+def load_test_repository(path):
+    try:
+        with open(
+            path,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            repository = json.load(file)
+
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "Некорректный файл тестового репозитория"
+        ) from error
+
+    if not isinstance(repository, dict):
+        raise ValueError(
+            "Тестовый репозиторий должен быть объектом JSON"
+        )
+
+    validate_test_repository(repository)
+    return repository
+
+
+def get_test_dependencies(package, repository):
+    if package not in repository:
+        raise ValueError(
+            f"Пакет '{package}' отсутствует "
+            "в тестовом репозитории"
+        )
+
+    return set(repository[package])
+
+
+def should_skip_package(package, depth, visited_depths):
+    previous_depth = visited_depths.get(package)
+
+    return (
+        previous_depth is not None
+        and previous_depth <= depth
     )
+
+
+def dfs(
+    package,
+    depth,
+    max_depth,
+    graph,
+    visited_depths,
+    get_dependencies,
+):
+    if should_skip_package(
+        package,
+        depth,
+        visited_depths,
+    ):
+        return
+
+    visited_depths[package] = depth
+    graph.setdefault(package, set())
+
+    if depth >= max_depth:
+        return
+
+    dependencies = set(get_dependencies(package))
+    graph[package].update(dependencies)
+
+    for dependency in sorted(dependencies):
+        graph.setdefault(
+            dependency,
+            set(),
+        )
+
+        dfs(
+            dependency,
+            depth + 1,
+            max_depth,
+            graph,
+            visited_depths,
+            get_dependencies,
+        )
+
+
+def build_graph(package, max_depth, get_dependencies):
+    graph = {}
+    visited_depths = {}
+
+    dfs(
+        package,
+        0,
+        max_depth,
+        graph,
+        visited_depths,
+        get_dependencies,
+    )
+
+    return graph
+
+
+def build_real_graph(package, repository, max_depth):
+    cache = {}
+
+    def get_dependencies(current_package):
+        return get_real_dependencies(
+            current_package,
+            repository,
+            cache,
+        )
+
+    return build_graph(
+        package,
+        max_depth,
+        get_dependencies,
+    )
+
+
+def build_test_graph(package, repository, max_depth):
+    if package not in repository:
+        raise ValueError(
+            f"Пакет '{package}' отсутствует "
+            "в тестовом репозитории"
+        )
+
+    def get_dependencies(current_package):
+        return get_test_dependencies(
+            current_package,
+            repository,
+        )
+
+    return build_graph(
+        package,
+        max_depth,
+        get_dependencies,
+    )
+
+
+def print_graph(graph):
+    print("Граф зависимостей:")
+
+    for package in sorted(graph):
+        dependencies = sorted(
+            graph[package]
+        )
+
+        if dependencies:
+            print(
+                f"{package}: "
+                f"{', '.join(dependencies)}"
+            )
+        else:
+            print(
+                f"{package}: нет зависимостей"
+            )
+
+
+def analyze(args):
+    if args.test_mode:
+        repository = load_test_repository(
+            args.repository
+        )
+
+        return build_test_graph(
+            args.package,
+            repository,
+            args.max_depth,
+        )
+
+    return build_real_graph(
+        args.package,
+        args.repository,
+        args.max_depth,
+    )
+
 
 def main():
     parser = create_parser()
@@ -266,15 +478,8 @@ def main():
 
     try:
         validate_args(args)
-
-        if args.test_mode:
-            print(
-                "Работа с тестовым репозиторием "
-                "будет реализована на Этапе 3"
-            )
-            return
-
-        analyze_package(args)
+        graph = analyze(args)
+        print_graph(graph)
 
     except ValueError as error:
         parser.error(str(error))

@@ -9,12 +9,17 @@ from unittest.mock import MagicMock, patch
 
 from src.main import (
     build_package_url,
+    build_test_graph,
     download_package,
     fetch_package_data,
     get_direct_dependencies,
     get_tarball_url,
+    get_test_dependencies,
+    is_valid_test_package,
+    load_test_repository,
     read_package_json,
     validate_args,
+    validate_test_repository,
     validate_url,
 )
 
@@ -95,7 +100,8 @@ class TestMain(unittest.TestCase):
 
     def test_missing_test_file(self):
         args = make_args(
-            repository="missing.txt",
+            package="A",
+            repository="missing.json",
             test_mode=True,
         )
 
@@ -110,11 +116,29 @@ class TestMain(unittest.TestCase):
 
         try:
             args = make_args(
+                package="A",
+                repository=path,
+                test_mode=True,
+            )
+            validate_args(args)
+        finally:
+            os.remove(path)
+
+    def test_invalid_test_package_argument(self):
+        with tempfile.NamedTemporaryFile(
+            delete=False
+        ) as file:
+            path = file.name
+
+        try:
+            args = make_args(
+                package="a",
                 repository=path,
                 test_mode=True,
             )
 
-            validate_args(args)
+            with self.assertRaises(ValueError):
+                validate_args(args)
         finally:
             os.remove(path)
 
@@ -188,7 +212,6 @@ class TestMain(unittest.TestCase):
 
     def test_get_direct_dependencies(self):
         package_json = {
-            "name": "test-package",
             "dependencies": {
                 "package-a": "^2.0.0",
                 "package-b": "^3.0.0",
@@ -283,6 +306,123 @@ class TestMain(unittest.TestCase):
             read_package_json(
                 b"not-a-real-archive"
             )
+
+    def test_valid_test_package(self):
+        self.assertTrue(
+            is_valid_test_package("ABC")
+        )
+
+    def test_invalid_lowercase_test_package(self):
+        self.assertFalse(
+            is_valid_test_package("Abc")
+        )
+
+    def test_validate_test_repository(self):
+        repository = {
+            "A": ["B"],
+            "B": [],
+        }
+
+        validate_test_repository(repository)
+
+    def test_invalid_test_repository_name(self):
+        repository = {
+            "a": [],
+        }
+
+        with self.assertRaises(ValueError):
+            validate_test_repository(repository)
+
+    def test_missing_dependency_description(self):
+        repository = {
+            "A": ["B"],
+        }
+
+        with self.assertRaises(ValueError):
+            validate_test_repository(repository)
+
+    def test_load_test_repository(self):
+        repository = {
+            "A": ["B"],
+            "B": [],
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            delete=False,
+        ) as file:
+            json.dump(repository, file)
+            path = file.name
+
+        try:
+            result = load_test_repository(path)
+            self.assertEqual(result, repository)
+        finally:
+            os.remove(path)
+
+    def test_missing_test_package(self):
+        repository = {
+            "A": [],
+        }
+
+        with self.assertRaises(ValueError):
+            get_test_dependencies(
+                "B",
+                repository,
+            )
+
+    def test_recursive_dependency_graph(self):
+        repository = {
+            "A": ["B"],
+            "B": ["C"],
+            "C": [],
+        }
+
+        graph = build_test_graph(
+            "A",
+            repository,
+            3,
+        )
+
+        self.assertEqual(graph["A"], {"B"})
+        self.assertEqual(graph["B"], {"C"})
+        self.assertEqual(graph["C"], set())
+
+    def test_maximum_depth(self):
+        repository = {
+            "A": ["B"],
+            "B": ["C"],
+            "C": ["D"],
+            "D": [],
+        }
+
+        graph = build_test_graph(
+            "A",
+            repository,
+            1,
+        )
+
+        self.assertEqual(graph["A"], {"B"})
+        self.assertEqual(graph["B"], set())
+        self.assertNotIn("C", graph)
+
+    def test_cyclic_dependencies(self):
+        repository = {
+            "A": ["B"],
+            "B": ["C"],
+            "C": ["A"],
+        }
+
+        graph = build_test_graph(
+            "A",
+            repository,
+            3,
+        )
+
+        self.assertEqual(graph["A"], {"B"})
+        self.assertEqual(graph["B"], {"C"})
+        self.assertEqual(graph["C"], {"A"})
 
 
 if __name__ == "__main__":
