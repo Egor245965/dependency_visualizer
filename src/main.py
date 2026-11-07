@@ -2,6 +2,7 @@ import argparse
 import io
 import json
 import os
+import subprocess
 import tarfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
@@ -489,6 +490,130 @@ def print_load_order(order):
     print(" -> ".join(order))
 
 
+def escape_dot(value):
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+    )
+
+
+def build_graphviz(graph):
+    lines = [
+        "digraph dependencies {",
+        "    rankdir=LR;",
+    ]
+
+    for package in sorted(graph):
+        name = escape_dot(package)
+        lines.append(f'    "{name}";')
+
+    for package in sorted(graph):
+        source = escape_dot(package)
+
+        for dependency in sorted(graph[package]):
+            target = escape_dot(dependency)
+            lines.append(
+                f'    "{source}" -> "{target}";'
+            )
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def save_graph_png(graphviz_text, output):
+    if not output.lower().endswith(".png"):
+        raise ValueError(
+            "Файл изображения должен иметь расширение .png"
+        )
+
+    try:
+        subprocess.run(
+            ["dot", "-Tpng", "-o", output],
+            input=graphviz_text,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    except FileNotFoundError as error:
+        raise ValueError(
+            "Graphviz не найден. Команда dot недоступна"
+        ) from error
+
+    except subprocess.CalledProcessError as error:
+        message = error.stderr.strip()
+
+        raise ValueError(
+            f"Ошибка Graphviz: {message}"
+        ) from error
+
+
+def ascii_tree_dfs(
+    package,
+    graph,
+    prefix,
+    is_last,
+    visited,
+    lines,
+):
+    connector = "`-- " if is_last else "|-- "
+    lines.append(prefix + connector + package)
+
+    if package in visited:
+        lines[-1] += " [повтор]"
+        return
+
+    visited.add(package)
+    dependencies = sorted(
+        graph.get(package, set())
+    )
+
+    child_prefix = (
+        prefix + ("    " if is_last else "|   ")
+    )
+
+    for index, dependency in enumerate(dependencies):
+        ascii_tree_dfs(
+            dependency,
+            graph,
+            child_prefix,
+            index == len(dependencies) - 1,
+            visited,
+            lines,
+        )
+
+
+def build_ascii_tree(graph, package):
+    lines = [package]
+    visited = {package}
+
+    dependencies = sorted(
+        graph.get(package, set())
+    )
+
+    for index, dependency in enumerate(dependencies):
+        ascii_tree_dfs(
+            dependency,
+            graph,
+            "",
+            index == len(dependencies) - 1,
+            visited,
+            lines,
+        )
+
+    return "\n".join(lines)
+
+
+def print_graphviz(graphviz_text):
+    print("Graphviz-представление:")
+    print(graphviz_text)
+
+
+def print_ascii_tree(tree):
+    print("ASCII-дерево:")
+    print(tree)
+
+
 def analyze(args):
     if args.test_mode:
         repository = load_test_repository(
@@ -515,13 +640,25 @@ def main():
     try:
         validate_args(args)
         graph = analyze(args)
-        print_graph(graph)
+        graphviz_text = build_graphviz(graph)
 
-        load_order = build_load_order(
-            graph,
-            args.package,
+        print_graphviz(graphviz_text)
+
+        save_graph_png(
+            graphviz_text,
+            args.output,
         )
-        print_load_order(load_order)
+
+        print(
+            f"Изображение сохранено: {args.output}"
+        )
+
+        if args.ascii_tree:
+            tree = build_ascii_tree(
+                graph,
+                args.package,
+            )
+            print_ascii_tree(tree)
 
     except ValueError as error:
         parser.error(str(error))

@@ -8,6 +8,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from src.main import (
+    build_ascii_tree,
+    build_graphviz,
     build_load_order,
     build_package_url,
     build_test_graph,
@@ -19,6 +21,7 @@ from src.main import (
     is_valid_test_package,
     load_test_repository,
     read_package_json,
+    save_graph_png,
     validate_args,
     validate_test_repository,
     validate_url,
@@ -462,6 +465,89 @@ class TestMain(unittest.TestCase):
         order = build_load_order(graph, "A")
 
         self.assertEqual(order, ["A"])
+
+
+    def test_build_graphviz(self):
+        graph = {
+            "A": {"B", "C"},
+            "B": set(),
+            "C": set(),
+        }
+
+        result = build_graphviz(graph)
+
+        self.assertIn(
+            '"A" -> "B";',
+            result,
+        )
+        self.assertIn(
+            '"A" -> "C";',
+            result,
+        )
+
+    def test_graphviz_contains_isolated_node(self):
+        graph = {
+            "A": set(),
+        }
+
+        result = build_graphviz(graph)
+
+        self.assertIn('"A";', result)
+
+    def test_ascii_tree(self):
+        graph = {
+            "A": {"B", "C"},
+            "B": {"D"},
+            "C": set(),
+            "D": set(),
+        }
+
+        result = build_ascii_tree(
+            graph,
+            "A",
+        )
+
+        self.assertEqual(
+            result,
+            "A\n"
+            "|-- B\n"
+            "|   `-- D\n"
+            "`-- C",
+        )
+
+    def test_ascii_tree_with_cycle(self):
+        graph = {
+            "A": {"B"},
+            "B": {"A"},
+        }
+
+        result = build_ascii_tree(
+            graph,
+            "A",
+        )
+
+        self.assertEqual(
+            result,
+            "A\n"
+            "`-- B\n"
+            "    `-- A [повтор]",
+        )
+
+    @patch("src.main.subprocess.run")
+    def test_save_graph_png(self, mock_run):
+        save_graph_png(
+            "digraph dependencies {}",
+            "graph.png",
+        )
+
+        mock_run.assert_called_once()
+
+    def test_invalid_png_extension(self):
+        with self.assertRaises(ValueError):
+            save_graph_png(
+                "digraph dependencies {}",
+                "graph.svg",
+            )
 
 
 if __name__ == "__main__":
