@@ -9,7 +9,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 30
 MIN_DEPTH = 1
 HTTP_NOT_FOUND = 404
 PACKAGE_JSON_PATH = "package/package.json"
@@ -239,7 +239,12 @@ def get_direct_dependencies(package_json):
     return package_json.get("dependencies", {})
 
 
-def get_real_dependencies(package, repository, cache):
+def get_real_dependencies(
+    package,
+    repository,
+    cache,
+    versions=None,
+):
     if package in cache:
         return cache[package]
 
@@ -248,9 +253,12 @@ def get_real_dependencies(package, repository, cache):
         package,
     )
 
-    _, tarball_url = get_tarball_url(
+    version, tarball_url = get_tarball_url(
         package_data
     )
+
+    if versions is not None:
+        versions[package] = version
 
     archive_data = download_package(
         tarball_url
@@ -266,6 +274,26 @@ def get_real_dependencies(package, repository, cache):
 
     cache[package] = dependencies
     return dependencies
+
+
+def get_real_version(package, repository):
+    package_data = fetch_package_data(
+        repository,
+        package,
+    )
+    version, _ = get_tarball_url(
+        package_data
+    )
+    return version
+
+
+def fill_missing_versions(graph, repository, versions):
+    for package in sorted(graph):
+        if package not in versions:
+            versions[package] = get_real_version(
+                package,
+                repository,
+            )
 
 
 def validate_test_repository(repository):
@@ -398,21 +426,37 @@ def build_graph(package, max_depth, get_dependencies):
     return graph
 
 
-def build_real_graph(package, repository, max_depth):
+def build_real_graph(
+    package,
+    repository,
+    max_depth,
+    versions=None,
+):
     cache = {}
+    version_map = versions if versions is not None else {}
 
     def get_dependencies(current_package):
         return get_real_dependencies(
             current_package,
             repository,
             cache,
+            version_map,
         )
 
-    return build_graph(
+    graph = build_graph(
         package,
         max_depth,
         get_dependencies,
     )
+
+    if versions is not None:
+        fill_missing_versions(
+            graph,
+            repository,
+            version_map,
+        )
+
+    return graph
 
 
 def build_test_graph(package, repository, max_depth):
@@ -497,15 +541,25 @@ def escape_dot(value):
     )
 
 
-def build_graphviz(graph):
+def build_graphviz(graph, versions=None):
     lines = [
         "digraph dependencies {",
         "    rankdir=LR;",
     ]
+    version_map = versions or {}
 
     for package in sorted(graph):
         name = escape_dot(package)
-        lines.append(f'    "{name}";')
+        version = version_map.get(package)
+
+        if version is None:
+            lines.append(f'    "{name}";')
+        else:
+            safe_version = escape_dot(version)
+            label = f"{name}\\n{safe_version}"
+            lines.append(
+                f'    "{name}" [label="{label}"];'
+            )
 
     for package in sorted(graph):
         source = escape_dot(package)
@@ -614,7 +668,7 @@ def print_ascii_tree(tree):
     print(tree)
 
 
-def analyze(args):
+def analyze(args, versions=None):
     if args.test_mode:
         repository = load_test_repository(
             args.repository
@@ -630,6 +684,7 @@ def analyze(args):
         args.package,
         args.repository,
         args.max_depth,
+        versions,
     )
 
 
@@ -639,8 +694,12 @@ def main():
 
     try:
         validate_args(args)
-        graph = analyze(args)
-        graphviz_text = build_graphviz(graph)
+        versions = {}
+        graph = analyze(args, versions)
+        graphviz_text = build_graphviz(
+            graph,
+            versions,
+        )
 
         print_graphviz(graphviz_text)
 
