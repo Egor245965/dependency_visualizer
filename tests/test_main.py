@@ -15,6 +15,7 @@ from src.main import (
     build_test_graph,
     download_package,
     fetch_package_data,
+    format_version_constraint,
     get_direct_dependencies,
     get_tarball_url,
     get_test_dependencies,
@@ -484,6 +485,78 @@ class TestMain(unittest.TestCase):
             '"A" -> "C";',
             result,
         )
+
+    def test_graphviz_versions_and_constraints(self):
+        graph = {
+            "A": {"B"},
+            "B": set(),
+        }
+        versions = {
+            "A": "1.2.3",
+            "B": "2.0.1",
+        }
+        constraints = {
+            ("A", "B"): "^2.0.0",
+        }
+
+        result = build_graphviz(
+            graph,
+            versions,
+            constraints,
+        )
+
+        self.assertIn(
+            '"A" [label="A\\nlatest: 1.2.3"];',
+            result,
+        )
+        self.assertIn(
+            '"A" -> "B" '
+            '[label=">=2.0.0 <3.0.0"];',
+            result,
+        )
+
+    def test_caret_constraint_major_version(self):
+        result = format_version_constraint("^3.1.2")
+
+        self.assertEqual(
+            result,
+            ">=3.1.2 <4.0.0",
+        )
+
+    def test_caret_constraint_zero_minor(self):
+        result = format_version_constraint("^0.2.3")
+
+        self.assertEqual(
+            result,
+            ">=0.2.3 <0.3.0",
+        )
+
+    def test_caret_constraint_zero_patch(self):
+        result = format_version_constraint("^0.0.3")
+
+        self.assertEqual(
+            result,
+            ">=0.0.3 <0.0.4",
+        )
+
+    def test_tilde_constraint(self):
+        result = format_version_constraint("~2.0.4")
+
+        self.assertEqual(
+            result,
+            ">=2.0.4 <2.1.0",
+        )
+
+    def test_exact_version_constraint(self):
+        result = format_version_constraint("1.2.3")
+
+        self.assertEqual(result, "=1.2.3")
+
+    def test_existing_range_is_preserved(self):
+        condition = ">=1.0.0 <2.0.0"
+        result = format_version_constraint(condition)
+
+        self.assertEqual(result, condition)
 
     def test_graphviz_contains_isolated_node(self):
         graph = {

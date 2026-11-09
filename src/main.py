@@ -2,6 +2,7 @@ import argparse
 import io
 import json
 import os
+import re
 import subprocess
 import tarfile
 from urllib.error import HTTPError, URLError
@@ -9,7 +10,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 10
 MIN_DEPTH = 1
 HTTP_NOT_FOUND = 404
 PACKAGE_JSON_PATH = "package/package.json"
@@ -239,11 +240,24 @@ def get_direct_dependencies(package_json):
     return package_json.get("dependencies", {})
 
 
+def save_dependency_constraints(
+    package,
+    dependency_data,
+    constraints,
+):
+    if constraints is None:
+        return
+
+    for dependency, condition in dependency_data.items():
+        constraints[(package, dependency)] = str(condition)
+
+
 def get_real_dependencies(
     package,
     repository,
     cache,
     versions=None,
+    constraints=None,
 ):
     if package in cache:
         return cache[package]
@@ -252,7 +266,6 @@ def get_real_dependencies(
         repository,
         package,
     )
-
     version, tarball_url = get_tarball_url(
         package_data
     )
@@ -260,18 +273,18 @@ def get_real_dependencies(
     if versions is not None:
         versions[package] = version
 
-    archive_data = download_package(
-        tarball_url
+    archive_data = download_package(tarball_url)
+    package_json = read_package_json(archive_data)
+    dependency_data = get_direct_dependencies(
+        package_json
+    )
+    save_dependency_constraints(
+        package,
+        dependency_data,
+        constraints,
     )
 
-    package_json = read_package_json(
-        archive_data
-    )
-
-    dependencies = set(
-        get_direct_dependencies(package_json)
-    )
-
+    dependencies = set(dependency_data)
     cache[package] = dependencies
     return dependencies
 
@@ -431,6 +444,7 @@ def build_real_graph(
     repository,
     max_depth,
     versions=None,
+    constraints=None,
 ):
     cache = {}
     version_map = versions if versions is not None else {}
@@ -441,6 +455,7 @@ def build_real_graph(
             repository,
             cache,
             version_map,
+            constraints,
         )
 
     graph = build_graph(
@@ -541,33 +556,112 @@ def escape_dot(value):
     )
 
 
-def build_graphviz(graph, versions=None):
+def build_node_line(package, versions):
+    name = escape_dot(package)
+    version = versions.get(package)
+
+    if version is None:
+        return f'    "{name}";'
+
+    safe_version = escape_dot(version)
+    label = f"{name}\\nlatest: {safe_version}"
+    return f'    "{name}" [label="{label}"];'
+
+
+def parse_simple_version(version):
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+
+    if match is None:
+        return None
+
+    return tuple(
+        int(part)
+        for part in match.groups()
+    )
+
+
+def caret_upper_bound(version):
+    major, minor, patch = version
+
+    if major > 0:
+        return major + 1, 0, 0
+
+    if minor > 0:
+        return 0, minor + 1, 0
+
+    return 0, 0, patch + 1
+
+
+def tilde_upper_bound(version):
+    major, minor, _ = version
+    return major, minor + 1, 0
+
+
+def format_version_constraint(condition):
+    condition = condition.strip()
+
+    if condition.startswith(("^", "~")):
+        version_text = condition[1:]
+        version = parse_simple_version(version_text)
+
+        if version is None:
+            return condition
+
+        if condition.startswith("^"):
+            upper = caret_upper_bound(version)
+        else:
+            upper = tilde_upper_bound(version)
+
+        upper_text = ".".join(str(part) for part in upper)
+        return f">={version_text} <{upper_text}"
+
+    if parse_simple_version(condition) is not None:
+        return f"={condition}"
+
+    return condition
+
+
+def build_edge_line(package, dependency, constraints):
+    source = escape_dot(package)
+    target = escape_dot(dependency)
+    condition = constraints.get((package, dependency))
+
+    if condition is None:
+        return f'    "{source}" -> "{target}";'
+
+    formatted = format_version_constraint(condition)
+    safe_condition = escape_dot(formatted)
+    return (
+        f'    "{source}" -> "{target}" '
+        f'[label="{safe_condition}"];'
+    )
+
+
+def build_graphviz(
+    graph,
+    versions=None,
+    constraints=None,
+):
     lines = [
         "digraph dependencies {",
         "    rankdir=LR;",
     ]
     version_map = versions or {}
+    constraint_map = constraints or {}
 
     for package in sorted(graph):
-        name = escape_dot(package)
-        version = version_map.get(package)
-
-        if version is None:
-            lines.append(f'    "{name}";')
-        else:
-            safe_version = escape_dot(version)
-            label = f"{name}\\n{safe_version}"
-            lines.append(
-                f'    "{name}" [label="{label}"];'
-            )
+        lines.append(
+            build_node_line(package, version_map)
+        )
 
     for package in sorted(graph):
-        source = escape_dot(package)
-
         for dependency in sorted(graph[package]):
-            target = escape_dot(dependency)
             lines.append(
-                f'    "{source}" -> "{target}";'
+                build_edge_line(
+                    package,
+                    dependency,
+                    constraint_map,
+                )
             )
 
     lines.append("}")
@@ -668,7 +762,11 @@ def print_ascii_tree(tree):
     print(tree)
 
 
-def analyze(args, versions=None):
+def analyze(
+    args,
+    versions=None,
+    constraints=None,
+):
     if args.test_mode:
         repository = load_test_repository(
             args.repository
@@ -685,6 +783,7 @@ def analyze(args, versions=None):
         args.repository,
         args.max_depth,
         versions,
+        constraints,
     )
 
 
@@ -695,10 +794,16 @@ def main():
     try:
         validate_args(args)
         versions = {}
-        graph = analyze(args, versions)
+        constraints = {}
+        graph = analyze(
+            args,
+            versions,
+            constraints,
+        )
         graphviz_text = build_graphviz(
             graph,
             versions,
+            constraints,
         )
 
         print_graphviz(graphviz_text)
